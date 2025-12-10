@@ -9,6 +9,7 @@ export interface RecorderSettings {
   showCamera: boolean;
   enableMic: boolean;
   enableSystemAudio: boolean;
+  cameraPosition: { x: number; y: number };
 }
 
 export interface RecordedMedia {

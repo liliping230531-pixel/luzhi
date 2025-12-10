@@ -19,7 +19,8 @@ import {
   Scissors,
   Check,
   RotateCcw,
-  GripVertical
+  GripVertical,
+  PictureInPicture2
 } from 'lucide-react';
 
 export { 
@@ -43,5 +44,6 @@ export {
   Scissors,
   Check,
   RotateCcw,
-  GripVertical
+  GripVertical,
+  PictureInPicture2
 };

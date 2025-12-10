@@ -1,14 +1,15 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { VideoOff } from './Icons';
+import { VideoOff, PictureInPicture2 } from './Icons';
 
 interface CameraBubbleProps {
   stream: MediaStream | null;
   visible: boolean;
+  position: { x: number; y: number };
+  onPositionChange: (pos: { x: number; y: number }) => void;
 }
 
-export const CameraBubble: React.FC<CameraBubbleProps> = ({ stream, visible }) => {
+export const CameraBubble: React.FC<CameraBubbleProps> = ({ stream, visible, position, onPositionChange }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const [position, setPosition] = useState({ x: 20, y: 20 });
   const [isDragging, setIsDragging] = useState(false);
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
 
@@ -26,12 +27,13 @@ export const CameraBubble: React.FC<CameraBubbleProps> = ({ stream, visible }) =
     });
   };
 
-  const handleMouseMove = (e: React.MouseEvent) => {
+  const handleMouseMove = (e: MouseEvent) => {
     if (isDragging) {
-      setPosition({
-        x: e.clientX - dragOffset.x,
-        y: e.clientY - dragOffset.y
-      });
+      const newX = e.clientX - dragOffset.x;
+      const newY = e.clientY - dragOffset.y;
+      
+      // Basic bounds checking could go here
+      onPositionChange({ x: newX, y: newY });
     }
   };
 
@@ -39,27 +41,41 @@ export const CameraBubble: React.FC<CameraBubbleProps> = ({ stream, visible }) =
     setIsDragging(false);
   };
 
+  const togglePiP = async () => {
+    if (videoRef.current && document.pictureInPictureEnabled) {
+      if (document.pictureInPictureElement) {
+        await document.exitPictureInPicture();
+      } else {
+        await videoRef.current.requestPictureInPicture();
+      }
+    }
+  };
+
   useEffect(() => {
     if (isDragging) {
+      window.addEventListener('mousemove', handleMouseMove);
       window.addEventListener('mouseup', handleMouseUp);
     } else {
+      window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     }
-    return () => window.removeEventListener('mouseup', handleMouseUp);
-  }, [isDragging]);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isDragging, dragOffset]);
 
   if (!visible) return null;
 
   return (
     <div
-      className="fixed z-50 cursor-move group"
+      className="fixed z-[9999] cursor-move group"
       style={{ 
         left: position.x, 
         top: position.y,
         touchAction: 'none'
       }}
       onMouseDown={handleMouseDown}
-      onMouseMove={handleMouseMove}
     >
       <div className="relative w-48 h-48 rounded-full overflow-hidden border-4 border-white/20 shadow-2xl ring-2 ring-indigo-500/50 transition-transform hover:scale-105 active:scale-95 bg-slate-900">
         {stream ? (
@@ -76,8 +92,19 @@ export const CameraBubble: React.FC<CameraBubbleProps> = ({ stream, visible }) =
           </div>
         )}
         
-        {/* Hover overlay indicating draggable */}
-        <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors pointer-events-none" />
+        {/* Overlay Controls */}
+        <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors flex items-center justify-center opacity-0 group-hover:opacity-100">
+             {stream && (
+               <button 
+                 onClick={(e) => { e.stopPropagation(); togglePiP(); }}
+                 className="bg-black/50 p-2 rounded-full hover:bg-black/70 text-white transition-all transform hover:scale-110"
+                 title="Picture-in-Picture"
+                 onMouseDown={e => e.stopPropagation()}
+               >
+                 <PictureInPicture2 size={20} />
+               </button>
+             )}
+        </div>
       </div>
     </div>
   );

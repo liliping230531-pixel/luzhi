@@ -16,7 +16,7 @@ import {
 import { RecorderState, RecorderSettings } from './types';
 import { CameraBubble } from './components/CameraBubble';
 import { FloatingControls } from './components/FloatingControls';
-import { mergeAudioStreams, formatTime } from './utils/streamUtils';
+import { mergeAudioStreams, formatTime, VideoCompositor } from './utils/streamUtils';
 import { translations, Language } from './utils/translations';
 
 const App: React.FC = () => {
@@ -25,6 +25,7 @@ const App: React.FC = () => {
     showCamera: true,
     enableMic: true,
     enableSystemAudio: true,
+    cameraPosition: { x: 20, y: window.innerHeight - 240 } // Default bottom-leftish
   });
   const [lang, setLang] = useState<Language>('zh');
   
@@ -32,15 +33,24 @@ const App: React.FC = () => {
   const [timer, setTimer] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [notification, setNotification] = useState<string | null>(null);
-  const [isSelecting, setIsSelecting] = useState(false); // New state for selection guide
+  const [isSelecting, setIsSelecting] = useState(false);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const timerIntervalRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null); // Main recording stream
   const writableStreamRef = useRef<any>(null); // FileSystemWritableFileStream
+  
+  // Ref to hold current position for the compositor to read without causing re-renders
+  const cameraPosRef = useRef(settings.cameraPosition);
+  const compositorRef = useRef<VideoCompositor | null>(null);
 
   const t = translations[lang];
+
+  // Sync ref with state
+  useEffect(() => {
+    cameraPosRef.current = settings.cameraPosition;
+  }, [settings.cameraPosition]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -63,6 +73,10 @@ const App: React.FC = () => {
     if (cameraStream) {
       cameraStream.getTracks().forEach(track => track.stop());
     }
+    if (compositorRef.current) {
+      compositorRef.current.stop();
+      compositorRef.current = null;
+    }
     if (timerIntervalRef.current) {
       clearInterval(timerIntervalRef.current);
     }
@@ -71,7 +85,7 @@ const App: React.FC = () => {
   const initializeCamera = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { width: 320, height: 320, facingMode: 'user' },
+        video: { width: 480, height: 480, facingMode: 'user' }, // Higher res for compositing
         audio: false 
       });
       setCameraStream(stream);
@@ -118,25 +132,29 @@ const App: React.FC = () => {
     setError(null);
     writableStreamRef.current = null;
     chunksRef.current = [];
-    setIsSelecting(true); // Show guide
+    setIsSelecting(true);
 
     let displayStream: MediaStream | null = null;
+    let finalStream: MediaStream | null = null;
 
     try {
-      // 1. Get Screen Stream (This prompts the user to select Area/Window/Screen)
+      // 1. Get Screen Stream
       displayStream = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
+        video: {
+            // Request high framerate for smooth compositing
+            frameRate: { ideal: 60 }
+        },
         audio: settings.enableSystemAudio
       });
       
-      setIsSelecting(false); // Hide guide on success
+      setIsSelecting(false);
 
       // Handle user stopping via browser UI
       displayStream.getVideoTracks()[0].onended = () => {
         stopRecording();
       };
 
-      // 2. Setup File Handle (Ask for save path)
+      // 2. Setup File Handle
       let useDirectSave = false;
       if ('showSaveFilePicker' in window) {
         try {
@@ -160,7 +178,7 @@ const App: React.FC = () => {
         }
       }
 
-      // 3. Get Mic Stream if enabled
+      // 3. Get Mic Stream
       let micStream: MediaStream | null = null;
       if (settings.enableMic) {
         try {
@@ -176,20 +194,49 @@ const App: React.FC = () => {
         }
       }
 
-      // 4. Merge Audio (System + Mic)
-      const combinedStream = mergeAudioStreams(displayStream, micStream);
-      streamRef.current = combinedStream;
+      // 4. Compositing Logic
+      // If camera is ON, we composite. If OFF, we just pass through.
+      if (settings.showCamera && cameraStream) {
+          // Initialize Compositor
+          const compositor = new VideoCompositor(
+              displayStream, 
+              cameraStream, 
+              () => cameraPosRef.current
+          );
+          const compositeVideo = compositor.start();
+          compositorRef.current = compositor;
+
+          // Merge Audio with the Composite Video
+          // Note: mergeAudioStreams takes a stream and extracts tracks.
+          // We pass 'displayStream' just to extract its AUDIO tracks (if any),
+          // but we want the VIDEO track from 'compositeVideo'.
+          
+          // Helper to get combined audio
+          const audioOnlyStream = mergeAudioStreams(displayStream, micStream);
+          
+          finalStream = new MediaStream([
+              ...compositeVideo.getVideoTracks(),
+              ...audioOnlyStream.getAudioTracks()
+          ]);
+
+      } else {
+          // Standard merge
+          finalStream = mergeAudioStreams(displayStream, micStream);
+      }
+
+      streamRef.current = finalStream;
 
       // 5. Setup Recorder
       const selectedMimeType = getSupportedMimeType();
       
-      if (!combinedStream.active) {
-         console.warn("Stream inactive before start (user stopped sharing?)");
+      if (!finalStream.active) {
+         console.warn("Stream inactive before start");
          return;
       }
 
-      const recorder = new MediaRecorder(combinedStream, {
-        mimeType: selectedMimeType
+      const recorder = new MediaRecorder(finalStream, {
+        mimeType: selectedMimeType,
+        videoBitsPerSecond: 2500000 // 2.5 Mbps for better quality
       });
       
       recorder.onerror = (event: any) => {
@@ -214,6 +261,12 @@ const App: React.FC = () => {
       };
 
       recorder.onstop = async () => {
+         // Clean up compositor
+         if (compositorRef.current) {
+             compositorRef.current.stop();
+             compositorRef.current = null;
+         }
+
         try {
             if (writableStreamRef.current) {
                 await writableStreamRef.current.close();
@@ -249,25 +302,20 @@ const App: React.FC = () => {
         setIsSelecting(false);
       };
 
-      recorder.start(1000); // Collect chunks every second
+      recorder.start(1000); 
       mediaRecorderRef.current = recorder;
       
-      // Start Timer
       setTimer(0);
       startTimer();
-
       setState(RecorderState.RECORDING);
 
-      // If camera is enabled but not initialized, try init
       if (settings.showCamera && !cameraStream) {
         await initializeCamera();
       }
 
     } catch (err: any) {
-      if (displayStream) {
-          (displayStream as MediaStream).getTracks().forEach(t => t.stop());
-      }
-      setIsSelecting(false); // Hide guide on error
+      if (displayStream) (displayStream as MediaStream).getTracks().forEach(t => t.stop());
+      setIsSelecting(false);
 
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError' || 
           err.message?.includes('Permission denied') || err.message?.includes('user denied')) {
@@ -324,6 +372,8 @@ const App: React.FC = () => {
       <CameraBubble 
         stream={cameraStream} 
         visible={settings.showCamera} 
+        position={settings.cameraPosition}
+        onPositionChange={(pos) => setSettings(s => ({...s, cameraPosition: pos}))}
       />
 
       {/* Notification Toast */}
