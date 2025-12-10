@@ -1,0 +1,9 @@
+{
+  "name": "KK Screen Recorder",
+  "description": "A professional screen recording tool similar to KK/Loom with camera overlay and area selection capabilities.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "display-capture"
+  ]
+}
